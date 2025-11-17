@@ -756,7 +756,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
               return "";
           }
         })();
-          const leftColumnX = idText ? 80 : 12;
+          const leftColumnX = idText ? leftPadding + idColumnWidth + gapBetween : leftPadding;
+          const labelMaxWidth = Math.max(40, effectiveLabelWidth - 10);
           const rightText = (() => {
           switch (rightLabel) {
             case "name":
@@ -782,14 +783,14 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                   <g onMouseEnter={() => setHoverId(t.ActivityID)} onMouseLeave={() => setHoverId(null)} opacity={hoverId ? (relatedIds.has(t.ActivityID) ? 1 : 0.35) : 1}>
                     {/* ID column */}
                     {idText && (
-                      <text x={12} y={y + 12} className="fill-foreground text-[12px] font-mono truncate" style={{ maxWidth: 60 }}>
+                      <text x={leftPadding} y={y + 12} className="fill-foreground text-[12px] font-mono truncate" style={{ maxWidth: idColumnWidth - 8 }}>
                         {idText}
                       </text>
                     )}
 
                     {/* left label / task name */}
                     {leftText && (
-                      <text x={leftColumnX} y={y + 12} className="fill-foreground text-[12px] truncate" style={{ maxWidth: 220 }}>
+                      <text x={leftColumnX} y={y + 12} className="fill-foreground text-[12px] truncate" style={{ maxWidth: labelMaxWidth }}>
                         {leftText}
                       </text>
                     )}
@@ -1246,6 +1247,10 @@ export default function Page() {
               <div className="text-xs text-muted-foreground mb-1">Timescale zoom: {zoom.toFixed(2)}x</div>
               <Slider value={[zoom]} onValueChange={(v)=>setZoom(Number(v[0]))} min={0.5} max={4} step={0.1} className="px-2" />
             </div>
+          </div>
+          <div className="md:col-span-2">
+            <div className="text-xs text-muted-foreground mb-1">Name column width: {labelColumnWidth}px</div>
+            <Slider value={[labelColumnWidth]} onValueChange={(v)=>setLabelColumnWidth(Number(v[0]))} min={140} max={360} step={10} className="px-2" />
           </div>
         </CardContent>
       </Card>
