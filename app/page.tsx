@@ -55,6 +55,7 @@ const sampleData = [
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const initialRows = prepareRows(sampleData.map((row) => normalizeRow(row)));
 
 // Normalize numeric/boolean fields coming from Excel to ensure bars render
 function normalizeRow(r) {
@@ -124,7 +125,6 @@ function normalizeRow(r) {
       ? r.Milestone.trim().toLowerCase()
       : r.Milestone;
   const ms = msVal === true || msVal === "true" || dur === 0;
-
   const coerceDate = (d) => {
     if (!d) return undefined;
     const t = d instanceof Date ? d : new Date(d);
@@ -176,6 +176,78 @@ function normalizeRow(r) {
   };
 }
 
+function getWbsLevel(row) {
+  const raw =
+    row.WBSLevel ??
+    row["WBS Level"] ??
+    row.OutlineLevel ??
+    row["Outline Level"];
+  const level = Number(raw);
+  return Number.isFinite(level) ? level : null;
+}
+
+function buildSummaryMeta(rows) {
+  const meta = rows.map(() => ({
+    isSummary: false,
+    children: [],
+    parentIndex: null,
+    level: null,
+  }));
+  const stack = [];
+  for (let i = 0; i < rows.length; i++) {
+    const level = getWbsLevel(rows[i]);
+    meta[i].level = level;
+    while (
+      stack.length &&
+      (level == null || level <= (stack[stack.length - 1]?.level ?? -Infinity))
+    ) {
+      stack.pop();
+    }
+    if (stack.length) {
+      const parent = stack[stack.length - 1];
+      meta[parent.index].children.push(i);
+      meta[parent.index].isSummary = true;
+      meta[i].parentIndex = parent.index;
+    }
+    if (Number.isFinite(level)) {
+      stack.push({ level, index: i });
+    } else {
+      stack.length = 0;
+    }
+  }
+  return meta;
+}
+
+function annotateSummaries(rows) {
+  const meta = buildSummaryMeta(rows);
+  return rows.map((row, idx) => ({
+    ...row,
+    IsSummary: meta[idx]?.isSummary ?? false,
+  }));
+}
+
+function withBaselineAnchors(rows) {
+  return rows.map((row) => {
+    const storedES = Number.isFinite(row.__baselineES)
+      ? row.__baselineES
+      : null;
+    const storedEF = Number.isFinite(row.__baselineEF)
+      ? row.__baselineEF
+      : null;
+    const esMs = storedES ?? parseDate(row.ES)?.getTime() ?? null;
+    const efMs = storedEF ?? parseDate(row.EF)?.getTime() ?? null;
+    return {
+      ...row,
+      __baselineES: esMs,
+      __baselineEF: efMs,
+    };
+  });
+}
+
+function prepareRows(rows) {
+  return withBaselineAnchors(annotateSummaries(rows));
+}
+
 function deriveDurationDays(row) {
   const dur = Number(row.DurDays);
   if (Number.isFinite(dur) && dur >= 0) return dur;
@@ -199,15 +271,22 @@ function normalizeRelType(type) {
 
 function simulateScenario(rows, rels, impact) {
   if (!rows?.length) return [];
+  const summaryMeta = buildSummaryMeta(rows);
   const tasks = rows.map((row, idx) => {
     const id = Number(row.ActivityID);
+    const baseES = Number.isFinite(row.__baselineES)
+      ? row.__baselineES
+      : parseDate(row.ES)?.getTime();
+    const baseEF = Number.isFinite(row.__baselineEF)
+      ? row.__baselineEF
+      : parseDate(row.EF)?.getTime();
     return {
       row,
       id,
       idx,
       duration: deriveDurationDays(row),
-      baseES: parseDate(row.ES)?.getTime(),
-      baseEF: parseDate(row.EF)?.getTime(),
+      baseES,
+      baseEF,
       baseLS: parseDate(row.LS)?.getTime(),
       baseLF: parseDate(row.LF)?.getTime(),
       ES: undefined,
@@ -216,32 +295,49 @@ function simulateScenario(rows, rels, impact) {
       LF: undefined,
       TotalFloat_d: Number(row.TotalFloat_d ?? 0),
       FreeFloat_d: Number(row.FreeFloat_d ?? 0),
+      isSummary: summaryMeta[idx]?.isSummary ?? false,
     };
   });
+  const logicTasks = tasks.filter(
+    (task) => Number.isFinite(task.id) && !task.isSummary
+  );
   const idMap = new Map();
-  for (const task of tasks) {
-    if (Number.isFinite(task.id)) idMap.set(task.id, task);
+  logicTasks.forEach((task) => {
+    idMap.set(task.id, task);
+  });
+  if (!idMap.size) {
+    return applySummaryEnvelopes(
+      rows.map((row, idx) => ({
+        ...row,
+        IsSummary: summaryMeta[idx]?.isSummary ?? row.IsSummary,
+      })),
+      summaryMeta
+    );
   }
-  if (!idMap.size) return rows.slice();
   const defaultStart = (() => {
     let min = Infinity;
-    idMap.forEach((task) => {
+    logicTasks.forEach((task) => {
       if (Number.isFinite(task.baseES)) min = Math.min(min, task.baseES);
     });
-    return Number.isFinite(min) ? min : Date.now();
+    return Number.isFinite(min) ? min : 0;
   })();
-  idMap.forEach((task) => {
-    if (!Number.isFinite(task.baseES)) task.baseES = defaultStart;
+  const anchor = (task) =>
+    Number.isFinite(task.baseES) ? task.baseES : defaultStart;
+  logicTasks.forEach((task) => {
     if (!Number.isFinite(task.duration)) task.duration = 0;
-    if (!Number.isFinite(task.baseEF)) task.baseEF = task.baseES + task.duration * DAY_MS;
   });
-  if (impact && Number.isFinite(Number(impact.activityId))) {
-    const hit = idMap.get(Number(impact.activityId));
+  const impactList = Array.isArray(impact?.impacts)
+    ? impact.impacts
+    : Number.isFinite(Number(impact?.activityId))
+    ? [impact]
+    : [];
+  impactList.forEach((entry) => {
+    const hit = idMap.get(Number(entry.activityId));
     if (hit) {
-      const delta = Number(impact.deltaDays) || 0;
+      const delta = Number(entry.deltaDays) || 0;
       hit.duration = Math.max(0, hit.duration + delta);
     }
-  }
+  });
   const edges = rels
     .filter((rel) => idMap.has(rel.PredID) && idMap.has(rel.SuccID))
     .map((rel) => ({ ...rel, RelType: normalizeRelType(rel.RelType) }));
@@ -256,9 +352,9 @@ function simulateScenario(rows, rels, impact) {
     push(succMap, rel.PredID, rel);
     indegree.set(rel.SuccID, (indegree.get(rel.SuccID) ?? 0) + 1);
   });
-  const queue = Array.from(idMap.values())
+  const queue = logicTasks
     .filter((task) => (indegree.get(task.id) ?? 0) === 0)
-    .sort((a, b) => (a.baseES ?? 0) - (b.baseES ?? 0));
+    .sort((a, b) => anchor(a) - anchor(b));
   const pending = new Map();
   const topo = [];
   while (queue.length) {
@@ -266,8 +362,8 @@ function simulateScenario(rows, rels, impact) {
     topo.push(current.id);
     const startReq = pending.get(current.id);
     const start = Number.isFinite(startReq)
-      ? Math.max(startReq, current.baseES ?? defaultStart)
-      : current.baseES ?? defaultStart;
+      ? Math.max(startReq, anchor(current))
+      : anchor(current);
     current.ES = start;
     current.EF = current.ES + current.duration * DAY_MS;
     for (const rel of succMap.get(current.id) || []) {
@@ -288,13 +384,13 @@ function simulateScenario(rows, rels, impact) {
       indegree.set(succ.id, deg);
       if (deg === 0) {
         queue.push(succ);
-        queue.sort((a, b) => (a.baseES ?? 0) - (b.baseES ?? 0));
+        queue.sort((a, b) => anchor(a) - anchor(b));
       }
     }
   }
   idMap.forEach((task) => {
     if (!Number.isFinite(task.ES)) {
-      task.ES = task.baseES ?? defaultStart;
+      task.ES = anchor(task);
       task.EF = task.ES + task.duration * DAY_MS;
     }
   });
@@ -305,7 +401,11 @@ function simulateScenario(rows, rels, impact) {
   const projectFinish = topoOrder.reduce((max, id) => {
     const t = idMap.get(id);
     if (!t) return max;
-    const ef = t.EF ?? t.baseEF ?? max;
+    const ef = Number.isFinite(t.EF)
+      ? t.EF
+      : Number.isFinite(t.baseEF)
+      ? t.baseEF
+      : anchor(t) + t.duration * DAY_MS;
     return Math.max(max, ef);
   }, defaultStart);
   const reverse = topoOrder.slice().reverse();
@@ -320,28 +420,46 @@ function simulateScenario(rows, rels, impact) {
       if (!succ) continue;
       const lagMs = (Number(rel.Lag_d) || 0) * DAY_MS;
       if (rel.RelType === "FS") {
-        lfLimit = Math.min(lfLimit, (succ.ES ?? succ.baseES ?? projectFinish) - lagMs);
+        lfLimit = Math.min(
+          lfLimit,
+          (succ.ES ?? anchor(succ)) - lagMs
+        );
       } else if (rel.RelType === "FF") {
-        lfLimit = Math.min(lfLimit, (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs);
+        lfLimit = Math.min(
+          lfLimit,
+          (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs
+        );
       } else if (rel.RelType === "SS") {
-        lsLimit = Math.min(lsLimit, (succ.ES ?? succ.baseES ?? projectFinish) - lagMs);
+        lsLimit = Math.min(
+          lsLimit,
+          (succ.ES ?? anchor(succ)) - lagMs
+        );
       } else if (rel.RelType === "SF") {
-        lsLimit = Math.min(lsLimit, (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs);
+        lsLimit = Math.min(
+          lsLimit,
+          (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs
+        );
       }
     }
-    let lf = Number.isFinite(lfLimit) ? lfLimit : Math.max(task.EF ?? (task.baseEF ?? projectFinish), projectFinish);
+    let lf = Number.isFinite(lfLimit)
+      ? lfLimit
+      : Math.max(
+          task.EF ?? (task.baseEF ?? projectFinish),
+          projectFinish
+        );
     let ls = lf - task.duration * DAY_MS;
     if (Number.isFinite(lsLimit)) {
       ls = Math.min(ls, lsLimit);
       lf = ls + task.duration * DAY_MS;
     }
-    if (!Number.isFinite(lf)) lf = task.EF ?? (task.baseEF ?? projectFinish);
+    if (!Number.isFinite(lf))
+      lf = task.EF ?? (task.baseEF ?? projectFinish);
     if (!Number.isFinite(ls)) ls = lf - task.duration * DAY_MS;
     task.LF = lf;
     task.LS = ls;
   }
   idMap.forEach((task) => {
-    const tfMs = (task.LS ?? task.ES ?? defaultStart) - (task.ES ?? defaultStart);
+    const tfMs = (task.LS ?? task.ES ?? anchor(task)) - (task.ES ?? anchor(task));
     task.TotalFloat_d = Math.round(tfMs / DAY_MS);
     const outgoing = succMap.get(task.id) || [];
     let minConstraint = Infinity;
@@ -350,22 +468,34 @@ function simulateScenario(rows, rels, impact) {
       if (!succ) continue;
       const lagMs = (Number(rel.Lag_d) || 0) * DAY_MS;
       if (rel.RelType === "FS") {
-        minConstraint = Math.min(minConstraint, (succ.ES ?? succ.baseES ?? projectFinish) - lagMs);
+        minConstraint = Math.min(
+          minConstraint,
+          (succ.ES ?? anchor(succ)) - lagMs
+        );
       } else if (rel.RelType === "FF") {
-        minConstraint = Math.min(minConstraint, (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs);
+        minConstraint = Math.min(
+          minConstraint,
+          (succ.EF ?? (succ.ES + succ.duration * DAY_MS)) - lagMs
+        );
       }
     }
     if (minConstraint < Infinity) {
-      const ffMs = minConstraint - (task.EF ?? (task.ES + task.duration * DAY_MS));
+      const ffMs =
+        minConstraint - (task.EF ?? (task.ES + task.duration * DAY_MS));
       task.FreeFloat_d = Math.max(0, Math.round(ffMs / DAY_MS));
     } else {
       task.FreeFloat_d = Math.max(0, task.TotalFloat_d);
     }
   });
-  return rows.map((row) => {
+  const updated = rows.map((row, idx) => {
     const id = Number(row.ActivityID);
     const task = idMap.get(id);
-    if (!task) return row;
+    if (!task) {
+      return {
+        ...row,
+        IsSummary: summaryMeta[idx]?.isSummary ?? row.IsSummary,
+      };
+    }
     const ES = toISODate(task.ES);
     const EF = toISODate(task.EF);
     const LS = toISODate(task.LS ?? task.baseLS);
@@ -379,8 +509,10 @@ function simulateScenario(rows, rels, impact) {
       DurDays: Math.round(task.duration * 100) / 100,
       TotalFloat_d: task.TotalFloat_d ?? row.TotalFloat_d,
       FreeFloat_d: task.FreeFloat_d ?? row.FreeFloat_d,
+      IsSummary: summaryMeta[idx]?.isSummary ?? row.IsSummary,
     };
   });
+  return applySummaryEnvelopes(updated, summaryMeta);
 }
 
 // Pure helper for tests and hook
@@ -460,6 +592,56 @@ function buildLinksFromPredecessors(rows) {
   return edges;
 }
 
+function applySummaryEnvelopes(rows, meta) {
+  if (!meta?.length) return rows;
+  const ensureSummary = (idx, seen = new Set()) => {
+    if (seen.has(idx)) return;
+    seen.add(idx);
+    const info = meta[idx];
+    if (!info?.isSummary || !info.children?.length) {
+      rows[idx] = { ...rows[idx], IsSummary: info?.isSummary ?? rows[idx].IsSummary };
+      return;
+    }
+    let minES = Infinity;
+    let maxEF = -Infinity;
+    let minLS = Infinity;
+    let maxLF = -Infinity;
+    for (const childIdx of info.children) {
+      if (meta[childIdx]?.isSummary) ensureSummary(childIdx, seen);
+      const child = rows[childIdx];
+      const es = parseDate(child.ES)?.getTime();
+      const ef = parseDate(child.EF)?.getTime();
+      const ls = parseDate(child.LS)?.getTime();
+      const lf = parseDate(child.LF)?.getTime();
+      if (Number.isFinite(es)) minES = Math.min(minES, es);
+      if (Number.isFinite(ef)) maxEF = Math.max(maxEF, ef);
+      if (Number.isFinite(ls)) minLS = Math.min(minLS, ls);
+      if (Number.isFinite(lf)) maxLF = Math.max(maxLF, lf);
+    }
+    if (minES < Infinity && maxEF > -Infinity) {
+      const esIso = toISODate(minES);
+      const efIso = toISODate(maxEF);
+      const lsIso = Number.isFinite(minLS) ? toISODate(minLS) : esIso;
+      const lfIso = Number.isFinite(maxLF) ? toISODate(maxLF) : efIso;
+      rows[idx] = {
+        ...rows[idx],
+        ES: esIso ?? rows[idx].ES,
+        EF: efIso ?? rows[idx].EF,
+        LS: lsIso ?? rows[idx].LS,
+        LF: lfIso ?? rows[idx].LF,
+        DurDays: Math.max(0, Math.round((maxEF - minES) / DAY_MS)),
+        IsSummary: true,
+      };
+    } else {
+      rows[idx] = { ...rows[idx], IsSummary: true };
+    }
+  };
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (meta[i]?.isSummary) ensureSummary(i);
+  }
+  return rows;
+}
+
 
 function readRelationshipSheet(wb) {
   const prefer = ["Relationships","Links","Logic","CPM_Relationships","Predecessor_Successor"];
@@ -511,9 +693,11 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
     return () => obs.disconnect();
   }, []);
 
-  const { min, max } = useScale(data);
-  const today = new Date();
-  const showToday = min && max && today >= min && today <= max;
+  const domain = useScale(data);
+  const min = domain.min;
+  const max = domain.max;
+  const [today] = useState(() => new Date());
+  const showToday = domain.min && domain.max && today >= domain.min && today <= domain.max;
   const rowHeight = 28;
   const barRadius = 8;
   const axisHeight = 48;
@@ -525,8 +709,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
   const effectiveLabelWidth = Math.max(80, Math.min(400, labelWidth));
   const leftGutter = leftPadding + idColumnWidth + gapBetween + effectiveLabelWidth;
   const rightPadding = 80;
-  const domainMin = min ? min.getTime() : Date.now();
-  const domainMax = max ? max.getTime() : domainMin + 1;
+  const domainMin = domain.min ? domain.min.getTime() : 0;
+  const domainMax = domain.max ? domain.max.getTime() : domainMin + 1;
   const totalMs = Math.max(1, domainMax - domainMin);
   const chartWidth = Math.max(200, width - leftGutter - rightPadding);
   const baseScale = (date) => {
@@ -615,14 +799,14 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
             {buildAxis.ticks.map((tick, idx) => (
               <g key={idx}>
                 <line
-                  x1={scaleXz(tick, width)}
-                  x2={scaleXz(tick, width)}
+                  x1={scaleXz(tick)}
+                  x2={scaleXz(tick)}
                   y1={0}
                   y2={axisHeight}
                   className="stroke-muted-foreground/30"
                 />
                 <text
-                  x={scaleXz(tick, width) + 6}
+                  x={scaleXz(tick) + 6}
                   y={axisHeight - 18}
                   className="fill-foreground text-[12px]"
                 >
@@ -633,8 +817,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
             {showToday && (
               <g>
                 <line
-                  x1={scaleXz(today, width)}
-                  x2={scaleXz(today, width)}
+                  x1={scaleXz(today)}
+                  x2={scaleXz(today)}
                   y1={0}
                   y2={axisHeight}
                   stroke="#111827"
@@ -642,7 +826,7 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                   strokeWidth={1.5}
                 />
                 <text
-                  x={scaleXz(today, width) + 6}
+                  x={scaleXz(today) + 6}
                   y={14}
                   className="text-[11px]"
                   fill="#111827"
@@ -665,8 +849,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
           {buildAxis.ticks.map((tick, idx) => (
             <line
               key={idx}
-              x1={scaleXz(tick, width)}
-              x2={scaleXz(tick, width)}
+              x1={scaleXz(tick)}
+              x2={scaleXz(tick)}
               y1={0}
               y2={chartHeight}
               className="stroke-muted-foreground/20"
@@ -674,8 +858,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
           ))}
           {showToday && (
             <line
-              x1={scaleXz(today, width)}
-              x2={scaleXz(today, width)}
+              x1={scaleXz(today)}
+              x2={scaleXz(today)}
               y1={0}
               y2={chartHeight}
               stroke="#111827"
@@ -699,12 +883,12 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
             const es2 = parseDate(t2.ES), ef2 = parseDate(t2.EF);
 
             // Anchor points by relationship type
-            let xStart = scaleXz(ef1, width), yStart = chartTop + i1 * rowHeight + 14;
-            let xEnd = scaleXz(es2, width), yEnd = chartTop + i2 * rowHeight + 14;
+            let xStart = scaleXz(ef1), yStart = chartTop + i1 * rowHeight + 14;
+            let xEnd = scaleXz(es2), yEnd = chartTop + i2 * rowHeight + 14;
             const rt = (e.RelType || "FS").toUpperCase();
-            if (rt === "SS") { xStart = scaleXz(es1, width); xEnd = scaleXz(es2, width); }
-            else if (rt === "FF") { xStart = scaleXz(ef1, width); xEnd = scaleXz(ef2, width); }
-            else if (rt === "SF") { xStart = scaleXz(es1, width); xEnd = scaleXz(ef2, width); }
+            if (rt === "SS") { xStart = scaleXz(es1); xEnd = scaleXz(es2); }
+            else if (rt === "FF") { xStart = scaleXz(ef1); xEnd = scaleXz(ef2); }
+            else if (rt === "SF") { xStart = scaleXz(es1); xEnd = scaleXz(ef2); }
 
             const midX = (xStart + xEnd) / 2;
             const active = !hoverId || relatedIds.has(e.PredID) || relatedIds.has(e.SuccID);
@@ -728,14 +912,20 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
         {data.map((t, i) => {
           const es = parseDate(t.ES);
           const ef = parseDate(t.EF);
-          const x1 = scaleXz(es, width);
-          const x2 = scaleXz(ef, width);
+          const x1 = scaleXz(es);
+          const x2 = scaleXz(ef);
           const y = chartTop + i * rowHeight + 6;
           const tfVal = Number(t.TotalFloat_d);
+          const isSummary = Boolean(t.IsSummary);
           const isCritical = tfVal <= 0;
           const isNear = !isCritical && tfVal > 0 && tfVal <= Number(threshold);
-          const color = isCritical ? "#ef4444" : isNear ? "#f59e0b" : "#3b82f6";
-          const ms = !!t.Milestone || Number(t.DurDays) === 0;
+          const baseColor = isCritical ? "#ef4444" : isNear ? "#f59e0b" : "#3b82f6";
+          const color = isSummary ? "#111827" : baseColor;
+          const ms = !isSummary && (t.Milestone === true || Number(t.DurDays) === 0);
+          const baseHeight = 16;
+          const summaryHeight = Math.max(2, baseHeight / 4);
+          const barHeight = isSummary ? summaryHeight : baseHeight;
+          const barY = y + (baseHeight - barHeight) / 2;
           const pct = Math.max(0, Math.min(100, Number(t.PctComplete ?? 0)));
           const idText = t.ActivityID != null ? String(t.ActivityID) : "";
 
@@ -803,9 +993,9 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                           animate={{ opacity: 1, x: 0 }}
                           transition={{ duration: 0.4, delay: i * 0.005 }}
                           x={x1}
-                          y={y}
+                          y={barY}
                           width={Math.max(6, x2 - x1)}
-                          height={16}
+                          height={barHeight}
                           rx={barRadius}
                           ry={barRadius}
                           style={{
@@ -822,9 +1012,9 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                         {pct > 0 && (
                           <rect
                             x={x1}
-                            y={y}
+                            y={barY}
                             width={Math.max(6, x2 - x1) * (pct / 100)}
-                            height={16}
+                            height={barHeight}
                             rx={barRadius}
                             ry={barRadius}
                             style={{ fill: color }}
@@ -888,6 +1078,10 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
   );
 }
 
+function createDraftImpact(seed = 0) {
+  return { id: `draft-${seed}`, activityId: "", mode: "delay", days: 10 };
+}
+
 function FloatChart({ data }) {
   const bins = useMemo(() => {
     const map = new Map();
@@ -924,7 +1118,7 @@ function FloatChart({ data }) {
 }
 
 export default function Page() {
-  const [rows, setRows] = useState(sampleData);
+  const [rows, setRows] = useState(initialRows);
   const [simRows, setSimRows] = useState(null);
   const [query, setQuery] = useState("");
   const [threshold, setThreshold] = useState(5);
@@ -937,9 +1131,8 @@ export default function Page() {
   const [zoom, setZoom] = useState(1);
   const [linksNotice, setLinksNotice] = useState("");
   const [fileName, setFileName] = useState("Sample schedule");
-  const [scenarioActivity, setScenarioActivity] = useState("");
-  const [scenarioMode, setScenarioMode] = useState("delay");
-  const [scenarioDays, setScenarioDays] = useState(10);
+  const [draftImpacts, setDraftImpacts] = useState(() => [createDraftImpact(1)]);
+  const [draftCounter, setDraftCounter] = useState(2);
   const [scenarioTitle, setScenarioTitle] = useState("");
   const [scenarioLibrary, setScenarioLibrary] = useState([]);
   const [activeScenario, setActiveScenario] = useState(null);
@@ -948,17 +1141,58 @@ export default function Page() {
   const [labelColumnWidth, setLabelColumnWidth] = useState(220);
   const exportRef = useRef(null);
   const activeRows = simRows ?? rows;
+  const rowById = useMemo(() => {
+    const map = new Map();
+    rows.forEach((r) => {
+      if (Number.isFinite(Number(r.ActivityID))) {
+        map.set(Number(r.ActivityID), r);
+      }
+    });
+    return map;
+  }, [rows]);
   const activityOptions = useMemo(() => {
     return rows
-      .filter((r) => Number.isFinite(Number(r.ActivityID)))
+      .filter(
+        (r) =>
+          Number.isFinite(Number(r.ActivityID)) && !(r.IsSummary ?? false)
+      )
       .map((r) => ({
         id: Number(r.ActivityID),
         label: `${r.ActivityID} — ${r.TaskName || "Untitled"}`,
       }))
       .sort((a, b) => a.id - b.id);
   }, [rows]);
-  const scenarioFormValid = Boolean(scenarioActivity && Math.abs(Number(scenarioDays)) > 0);
+  const validDraftImpacts = useMemo(() => {
+    return draftImpacts
+      .map((impact) => {
+        const activityId = Number(impact.activityId);
+        const days = Math.abs(Number(impact.days));
+        const row = rowById.get(activityId);
+        if (!Number.isFinite(activityId) || days <= 0 || !row || row.IsSummary) return null;
+        const deltaDays = impact.mode === "delay" ? days : -days;
+        return { activityId, deltaDays };
+      })
+      .filter(Boolean);
+  }, [draftImpacts, rowById]);
+  const scenarioFormValid = validDraftImpacts.length > 0;
   const maxScenariosReached = scenarioLibrary.length >= 10;
+  const addDraftImpact = () => {
+    setDraftImpacts((prev) => [...prev, createDraftImpact(draftCounter)]);
+    setDraftCounter((c) => c + 1);
+  };
+  const updateDraftImpact = (id, patch) => {
+    setDraftImpacts((prev) => prev.map((impact) => (impact.id === id ? { ...impact, ...patch } : impact)));
+  };
+  const removeDraftImpact = (id) => {
+    setDraftImpacts((prev) => {
+      if (prev.length === 1) return prev;
+      return prev.filter((impact) => impact.id !== id);
+    });
+  };
+  const resetDraftImpacts = () => {
+    setDraftImpacts([createDraftImpact(1)]);
+    setDraftCounter(2);
+  };
 
   // KPIs
   const kpis = useMemo(() => {
@@ -1025,15 +1259,14 @@ export default function Page() {
       }
       return r;
     });
-    const cleaned = mapped.map(normalizeRow);
-    setRows(cleaned);
+    const normalized = mapped.map(normalizeRow);
+    const prepared = prepareRows(normalized);
+    setRows(prepared);
     setSimRows(null);
     setActiveScenario(null);
     setScenarioStatus("");
-    setScenarioActivity("");
     setScenarioTitle("");
-    setScenarioMode("delay");
-    setScenarioDays(10);
+    resetDraftImpacts();
 
     // relationships: prefer dedicated sheet, else parse Predecessors column
     let edges = readRelationshipSheet(wb);
@@ -1053,25 +1286,52 @@ export default function Page() {
     a.click();
   };
 
+  const normalizeScenarioImpacts = (scenario) => {
+    if (!scenario) return [];
+    const raw = Array.isArray(scenario.impacts)
+      ? scenario.impacts
+      : Number.isFinite(Number(scenario.activityId))
+      ? [{ activityId: scenario.activityId, deltaDays: scenario.deltaDays }]
+      : [];
+    return raw
+      .map((impact) => {
+        const activityId = Number(impact.activityId);
+        if (!Number.isFinite(activityId)) return null;
+        return {
+          activityId,
+          deltaDays: Number(impact.deltaDays) || 0,
+        };
+      })
+      .filter(Boolean);
+  };
+
   const runScenario = async (scenario) => {
-    if (!scenario || !Number.isFinite(Number(scenario.activityId))) {
-      setScenarioStatus("Select a valid activity ID and impact before running a scenario.");
+    const impacts = normalizeScenarioImpacts(scenario);
+    if (!impacts.length) {
+      setScenarioStatus("Add at least one valid activity adjustment before running a scenario.");
       return;
     }
-    const exists = rows.some((r) => Number(r.ActivityID) === Number(scenario.activityId));
-    if (!exists) {
-      setScenarioStatus(`Activity ${scenario.activityId} is not present in the current dataset.`);
+    const missing = impacts.find((impact) => !rowById.has(impact.activityId));
+    if (missing) {
+      setScenarioStatus(`Activity ${missing.activityId} is not present in the current dataset.`);
+      return;
+    }
+    const summaryHit = impacts.find(
+      (impact) => rowById.get(impact.activityId)?.IsSummary
+    );
+    if (summaryHit) {
+      setScenarioStatus(`Activity ${summaryHit.activityId} is a summary/parent task and cannot be simulated directly.`);
       return;
     }
     setIsSimulating(true);
     setScenarioStatus("Re-running forward/backward passes...");
     await new Promise((resolve) => setTimeout(resolve, 350));
-    const simulated = simulateScenario(rows, rels, scenario);
+    const simulated = simulateScenario(rows, rels, { impacts });
     setSimRows(simulated);
-    setActiveScenario(scenario);
+    setActiveScenario({ ...scenario, impacts });
     setIsSimulating(false);
     setScenarioStatus(
-      `Scenario "${scenario.title}" applied (${scenario.deltaDays >= 0 ? "+" : ""}${scenario.deltaDays}d on activity ${scenario.activityId}).`
+      `Scenario "${scenario.title}" applied to ${impacts.length} activit${impacts.length === 1 ? "y" : "ies"}.`
     );
   };
 
@@ -1083,38 +1343,36 @@ export default function Page() {
 
   const handleRunScenario = async () => {
     if (!scenarioFormValid) {
-      setScenarioStatus("Choose an activity and an impact greater than 0 days.");
+      setScenarioStatus("Add at least one valid activity adjustment before running the scenario.");
       return;
     }
-    const impactDays = Math.abs(Number(scenarioDays));
-    const deltaDays = scenarioMode === "delay" ? impactDays : -impactDays;
+    const impactsSnapshot = validDraftImpacts.map((impact) => ({ ...impact }));
     const scenario = {
-      id: `adhoc-${Date.now()}`,
-      title: scenarioTitle.trim() || `Scenario for #${scenarioActivity}`,
-      activityId: Number(scenarioActivity),
-      deltaDays,
-      createdAt: Date.now(),
+      id: `adhoc-${validDraftImpacts.length}`,
+      title:
+        scenarioTitle.trim() ||
+        `Ad-hoc scenario (${validDraftImpacts.length} activit${validDraftImpacts.length === 1 ? "y" : "ies"})`,
+      impacts: impactsSnapshot,
+      createdAt: Number(rows[0]?.ES ? new Date(rows[0].ES).getTime() : 0),
     };
     await runScenario(scenario);
   };
 
   const handleSaveScenario = () => {
     if (!scenarioFormValid) {
-      setScenarioStatus("Choose an activity and impact before saving the scenario.");
+      setScenarioStatus("Add at least one valid activity adjustment before saving the scenario.");
       return;
     }
     if (maxScenariosReached) {
       setScenarioStatus("Scenario library full (10). Delete one to add a new scenario.");
       return;
     }
-    const impactDays = Math.abs(Number(scenarioDays));
-    const deltaDays = scenarioMode === "delay" ? impactDays : -impactDays;
+    const impactsSnapshot = validDraftImpacts.map((impact) => ({ ...impact }));
     const scenario = {
-      id: `scenario-${Date.now()}`,
+      id: `scenario-${scenarioLibrary.length + 1}`,
       title: scenarioTitle.trim() || `Scenario ${scenarioLibrary.length + 1}`,
-      activityId: Number(scenarioActivity),
-      deltaDays,
-      createdAt: Date.now(),
+      impacts: impactsSnapshot,
+      createdAt: Number(rows[0]?.ES ? new Date(rows[0].ES).getTime() : 0),
     };
     setScenarioLibrary((prev) => [...prev, scenario]);
     setScenarioStatus(`Scenario "${scenario.title}" saved.`);
@@ -1282,7 +1540,7 @@ export default function Page() {
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <div className="text-sm font-semibold">Scenario lab</div>
-              <p className="text-xs text-muted-foreground">Select an activity, apply a delay/acceleration, then re-run CPM. Save up to 10 scenarios.</p>
+              <p className="text-xs text-muted-foreground">Chain multiple activity adjustments, then re-run CPM. Save up to 10 scenarios.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {activeScenario && (
@@ -1302,49 +1560,75 @@ export default function Page() {
               </Button>
             </div>
           </div>
-          <div className="grid gap-3 md:grid-cols-4">
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">Activity ID</div>
-              <Select value={scenarioActivity} onValueChange={setScenarioActivity}>
-                <SelectTrigger className="rounded-xl">
-                  <SelectValue placeholder="Select activity" />
-                </SelectTrigger>
-                <SelectContent className="max-h-64">
-                  {activityOptions.map((opt) => (
-                    <SelectItem key={opt.id} value={String(opt.id)}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">Impact</div>
-              <div className="flex gap-2">
-                <Select value={scenarioMode} onValueChange={setScenarioMode}>
-                  <SelectTrigger className="rounded-xl w-32">
-                    <SelectValue placeholder="Impact" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="delay">Delay</SelectItem>
-                    <SelectItem value="accelerate">Accelerate</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Input
-                  type="number"
-                  min={0}
-                  className="rounded-xl"
-                  value={scenarioDays}
-                  onChange={(e) => setScenarioDays(Math.max(0, Number(e.target.value) || 0))}
-                  placeholder="Days"
-                />
+          <div className="space-y-3">
+            {draftImpacts.map((draft, idx) => (
+              <div key={draft.id} className="rounded-2xl border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <Badge variant="secondary" className="rounded-full">
+                    Linked activity #{idx + 1}
+                  </Badge>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="rounded-full"
+                    onClick={() => removeDraftImpact(draft.id)}
+                    disabled={draftImpacts.length === 1}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <div className="text-xs text-muted-foreground">Activity ID</div>
+                    <Select value={draft.activityId} onValueChange={(val) => updateDraftImpact(draft.id, { activityId: val })}>
+                      <SelectTrigger className="rounded-xl">
+                        <SelectValue placeholder="Select activity" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-64">
+                        {activityOptions.map((opt) => (
+                          <SelectItem key={opt.id} value={String(opt.id)}>
+                            {opt.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-xs text-muted-foreground">Impact</div>
+                    <div className="flex gap-2">
+                      <Select value={draft.mode} onValueChange={(val) => updateDraftImpact(draft.id, { mode: val })}>
+                        <SelectTrigger className="rounded-xl w-32">
+                          <SelectValue placeholder="Impact" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="delay">Delay</SelectItem>
+                          <SelectItem value="accelerate">Accelerate</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        type="number"
+                        min={0}
+                        className="rounded-xl"
+                        value={draft.days}
+                        onChange={(e) => updateDraftImpact(draft.id, { days: Math.max(0, Number(e.target.value) || 0) })}
+                        placeholder="Days"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="space-y-1">
+            ))}
+            <Button type="button" variant="outline" className="rounded-2xl" onClick={addDraftImpact}>
+              <PlusCircle className="w-4 h-4 mr-2" />
+              Add linked activity
+            </Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="space-y-1 md:col-span-2">
               <div className="text-xs text-muted-foreground">Scenario title</div>
               <Input
                 className="rounded-xl"
-                placeholder="e.g. Rain delay"
+                placeholder="e.g. Rain delay chain"
                 value={scenarioTitle}
                 onChange={(e) => setScenarioTitle(e.target.value)}
               />
@@ -1381,7 +1665,7 @@ export default function Page() {
               </Badge>
             </div>
             {scenarioLibrary.length === 0 ? (
-              <div className="text-xs text-muted-foreground">No saved scenarios yet. Configure an impact and click save.</div>
+              <div className="text-xs text-muted-foreground">No saved scenarios yet. Add linked activities above and click save.</div>
             ) : (
               <div className="space-y-2">
                 {scenarioLibrary.map((scenario) => (
@@ -1389,11 +1673,14 @@ export default function Page() {
                     key={scenario.id}
                     className="flex flex-col gap-2 rounded-2xl border p-3 md:flex-row md:items-center md:justify-between"
                   >
-                    <div>
+                    <div className="space-y-1">
                       <div className="text-sm font-medium">{scenario.title}</div>
-                      <div className="text-xs text-muted-foreground">
-                        Activity {scenario.activityId} ·{" "}
-                        {scenario.deltaDays >= 0 ? `Delay +${scenario.deltaDays}d` : `Accelerate ${Math.abs(scenario.deltaDays)}d`}
+                      <div className="flex flex-wrap gap-2">
+                        {normalizeScenarioImpacts(scenario).map((impact, idx) => (
+                          <Badge key={idx} variant="outline" className="rounded-full text-[11px]">
+                            #{idx + 1}: {impact.activityId} {impact.deltaDays >= 0 ? `+${impact.deltaDays}d` : `${impact.deltaDays}d`}
+                          </Badge>
+                        ))}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
