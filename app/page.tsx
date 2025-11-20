@@ -130,6 +130,32 @@ function normalizeRow(r) {
     const t = d instanceof Date ? d : new Date(d);
     return isNaN(t.getTime()) ? undefined : t.toISOString().slice(0, 10);
   };
+  const summaryCell =
+    r.Summary ??
+    r["Summary"] ??
+    r.IsSummary ??
+    r["Is Summary"] ??
+    r["Summary Task"];
+  const summaryFromExcel = (() => {
+    if (typeof summaryCell === "boolean") return summaryCell;
+    if (summaryCell == null) return false;
+    const val = String(summaryCell).trim().toLowerCase();
+    return ["true", "yes", "y", "1"].includes(val);
+  })();
+  const constraintType =
+    r.Constraint_Type ??
+    r["Constraint Type"] ??
+    r.ConstraintType ??
+    r["Constraint"];
+  const constraintDate = coerceDate(
+    r.Constraint_Date ?? r["Constraint Date"] ?? r.ConstraintDate
+  );
+  const successors =
+    r.Successors ??
+    r["Successor"] ??
+    r["Successors"] ??
+    r["Successor IDs"] ??
+    r["Successor Ids"];
 
   const ES =
     r.ES ??
@@ -158,6 +184,10 @@ function normalizeRow(r) {
     PctComplete: pct,
     Milestone: ms,
     WBSLevel: isNaN(WBSLevel) ? undefined : WBSLevel,
+    IsSummaryExcel: summaryFromExcel,
+    ConstraintType: constraintType ? String(constraintType).trim() : undefined,
+    ConstraintDate: constraintDate,
+    Successors: successors,
     ActivityID:
       (r.ActivityID ??
         r.ID ??
@@ -197,6 +227,9 @@ function buildSummaryMeta(rows) {
   for (let i = 0; i < rows.length; i++) {
     const level = getWbsLevel(rows[i]);
     meta[i].level = level;
+    if (rows[i]?.IsSummaryExcel) {
+      meta[i].isSummary = true;
+    }
     while (
       stack.length &&
       (level == null || level <= (stack[stack.length - 1]?.level ?? -Infinity))
@@ -222,7 +255,7 @@ function annotateSummaries(rows) {
   const meta = buildSummaryMeta(rows);
   return rows.map((row, idx) => ({
     ...row,
-    IsSummary: meta[idx]?.isSummary ?? false,
+    IsSummary: (meta[idx]?.isSummary ?? false) || Boolean(row.IsSummaryExcel),
   }));
 }
 
@@ -712,16 +745,14 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
   const domainMin = domain.min ? domain.min.getTime() : 0;
   const domainMax = domain.max ? domain.max.getTime() : domainMin + 1;
   const totalMs = Math.max(1, domainMax - domainMin);
-  const chartWidth = Math.max(200, width - leftGutter - rightPadding);
-  const baseScale = (date) => {
+  const baseChartWidth = Math.max(200, width - leftGutter - rightPadding);
+  const chartWidth = baseChartWidth * zoom;
+  const svgWidth = leftGutter + chartWidth + rightPadding;
+  const scaleX = (date) => {
     const t = parseDate(date)?.getTime();
     const clamped = Number.isFinite(t) ? t : domainMin;
     const ratio = (clamped - domainMin) / totalMs;
     return leftGutter + ratio * chartWidth;
-  };
-  const scaleXz = (date) => {
-    const base = baseScale(date);
-    return leftGutter + (base - leftGutter) * zoom;
   };
 
   const buildAxis = useMemo(() => {
@@ -794,31 +825,42 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
     <div className="rounded-2xl border bg-card">
       <div ref={wrapperRef} className="w-full overflow-auto relative max-h-[70vh] rounded-2xl">
         <div className="sticky top-0 z-10 bg-card">
-          <svg width={width} height={axisHeight} className="block pointer-events-none">
-            <rect x={0} y={0} width={width} height={axisHeight} className="fill-muted" />
-            {buildAxis.ticks.map((tick, idx) => (
-              <g key={idx}>
-                <line
-                  x1={scaleXz(tick)}
-                  x2={scaleXz(tick)}
-                  y1={0}
-                  y2={axisHeight}
-                  className="stroke-muted-foreground/30"
-                />
-                <text
-                  x={scaleXz(tick) + 6}
-                  y={axisHeight - 18}
-                  className="fill-foreground text-[12px]"
-                >
-                  {buildAxis.fmt(tick)}
-                </text>
-              </g>
-            ))}
+          <svg width={svgWidth} height={axisHeight} className="block pointer-events-none">
+            <rect x={0} y={0} width={svgWidth} height={axisHeight} className="fill-muted" />
+            {(() => {
+              const labelGap = 70;
+              let lastLabelX = -Infinity;
+              return buildAxis.ticks.map((tick, idx) => {
+                const x = scaleX(tick);
+                const showLabel = x - lastLabelX >= labelGap;
+                if (showLabel) lastLabelX = x;
+                return (
+                  <g key={idx}>
+                    <line
+                      x1={x}
+                      x2={x}
+                      y1={0}
+                      y2={axisHeight}
+                      className="stroke-muted-foreground/30"
+                    />
+                    {showLabel && (
+                      <text
+                        x={x + 6}
+                        y={axisHeight - 18}
+                        className="fill-foreground text-[12px]"
+                      >
+                        {buildAxis.fmt(tick)}
+                      </text>
+                    )}
+                  </g>
+                );
+              });
+            })()}
             {showToday && (
               <g>
                 <line
-                  x1={scaleXz(today)}
-                  x2={scaleXz(today)}
+                  x1={scaleX(today)}
+                  x2={scaleX(today)}
                   y1={0}
                   y2={axisHeight}
                   stroke="#111827"
@@ -826,7 +868,7 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                   strokeWidth={1.5}
                 />
                 <text
-                  x={scaleXz(today) + 6}
+                  x={scaleX(today) + 6}
                   y={14}
                   className="text-[11px]"
                   fill="#111827"
@@ -837,7 +879,7 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
             )}
           </svg>
         </div>
-        <svg width={width} height={chartHeight} className="block">
+        <svg width={svgWidth} height={chartHeight} className="block">
           {/* Arrowhead defs for links */}
           <defs>
             <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -849,8 +891,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
           {buildAxis.ticks.map((tick, idx) => (
             <line
               key={idx}
-              x1={scaleXz(tick)}
-              x2={scaleXz(tick)}
+              x1={scaleX(tick)}
+              x2={scaleX(tick)}
               y1={0}
               y2={chartHeight}
               className="stroke-muted-foreground/20"
@@ -858,8 +900,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
           ))}
           {showToday && (
             <line
-              x1={scaleXz(today)}
-              x2={scaleXz(today)}
+              x1={scaleX(today)}
+              x2={scaleX(today)}
               y1={0}
               y2={chartHeight}
               stroke="#111827"
@@ -883,12 +925,12 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
             const es2 = parseDate(t2.ES), ef2 = parseDate(t2.EF);
 
             // Anchor points by relationship type
-            let xStart = scaleXz(ef1), yStart = chartTop + i1 * rowHeight + 14;
-            let xEnd = scaleXz(es2), yEnd = chartTop + i2 * rowHeight + 14;
+            let xStart = scaleX(ef1), yStart = chartTop + i1 * rowHeight + 14;
+            let xEnd = scaleX(es2), yEnd = chartTop + i2 * rowHeight + 14;
             const rt = (e.RelType || "FS").toUpperCase();
-            if (rt === "SS") { xStart = scaleXz(es1); xEnd = scaleXz(es2); }
-            else if (rt === "FF") { xStart = scaleXz(ef1); xEnd = scaleXz(ef2); }
-            else if (rt === "SF") { xStart = scaleXz(es1); xEnd = scaleXz(ef2); }
+            if (rt === "SS") { xStart = scaleX(es1); xEnd = scaleX(es2); }
+            else if (rt === "FF") { xStart = scaleX(ef1); xEnd = scaleX(ef2); }
+            else if (rt === "SF") { xStart = scaleX(es1); xEnd = scaleX(ef2); }
 
             const midX = (xStart + xEnd) / 2;
             const active = !hoverId || relatedIds.has(e.PredID) || relatedIds.has(e.SuccID);
@@ -912,8 +954,8 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
         {data.map((t, i) => {
           const es = parseDate(t.ES);
           const ef = parseDate(t.EF);
-          const x1 = scaleXz(es);
-          const x2 = scaleXz(ef);
+          const x1 = scaleX(es);
+          const x2 = scaleX(ef);
           const y = chartTop + i * rowHeight + 6;
           const tfVal = Number(t.TotalFloat_d);
           const isSummary = Boolean(t.IsSummary);
