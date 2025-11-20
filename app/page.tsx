@@ -990,6 +990,7 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
         })();
           const leftColumnX = idText ? leftPadding + idColumnWidth + gapBetween : leftPadding;
           const labelMaxWidth = Math.max(40, effectiveLabelWidth - 10);
+          const labelClipId = `labelClip-${t.ActivityID ?? i}`;
           const rightText = (() => {
           switch (rightLabel) {
             case "name":
@@ -1015,16 +1016,26 @@ function Gantt({ data, threshold, leftLabel = "name", rightLabel = "none", showL
                   <g onMouseEnter={() => setHoverId(t.ActivityID)} onMouseLeave={() => setHoverId(null)} opacity={hoverId ? (relatedIds.has(t.ActivityID) ? 1 : 0.35) : 1}>
                     {/* ID column */}
                     {idText && (
-                      <text x={leftPadding} y={y + 12} className="fill-foreground text-[12px] font-mono truncate" style={{ maxWidth: idColumnWidth - 8 }}>
+                      <text x={leftPadding} y={y + 12} className="fill-foreground text-[12px] font-mono">
                         {idText}
                       </text>
                     )}
 
                     {/* left label / task name */}
                     {leftText && (
-                      <text x={leftColumnX} y={y + 12} className="fill-foreground text-[12px] truncate" style={{ maxWidth: labelMaxWidth }}>
-                        {leftText}
-                      </text>
+                      <>
+                        <clipPath id={labelClipId}>
+                          <rect x={leftColumnX} y={y - 2} width={labelMaxWidth} height={20} />
+                        </clipPath>
+                        <text
+                          x={leftColumnX}
+                          y={y + 12}
+                          className="fill-foreground text-[12px]"
+                          clipPath={`url(#${labelClipId})`}
+                        >
+                          {leftText}
+                        </text>
+                      </>
                     )}
 
                     {/* bar or milestone */}
@@ -1457,6 +1468,20 @@ export default function Page() {
           </div>
         </div>
         <div className="flex gap-2">
+          <label className="inline-flex items-center gap-2 cursor-pointer rounded-2xl border px-4 py-2 text-sm hover:bg-muted transition-colors">
+            <Upload className="w-4 h-4" />
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                await handleUploadXLSX(file);
+              }}
+            />
+            <span>Upload Excel</span>
+          </label>
           <Button onClick={exportPNG} variant="secondary" className="rounded-2xl"><Download className="w-4 h-4 mr-2"/>Export PNG</Button>
         </div>
       </div>
@@ -1476,7 +1501,12 @@ export default function Page() {
 
       {/* Controls */}
       <Card className="rounded-2xl">
-        <CardContent className="p-4 grid gap-3 md:grid-cols-8">
+        <CardContent className="p-4 space-y-4">
+          <div>
+            <div className="text-sm font-semibold">Chart settings</div>
+            <p className="text-xs text-muted-foreground">Adjust filters, labels, logic links, and zoom.</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-8">
           <div className="flex items-center gap-2">
             <Search className="w-4 h-4 text-muted-foreground"/>
             <Input placeholder="Search by ID or Task name" value={query} onChange={(e)=>setQuery(e.target.value)} className="rounded-xl" />
@@ -1552,26 +1582,6 @@ export default function Page() {
             <div className="text-xs text-muted-foreground mb-1">Name column width: {labelColumnWidth}px</div>
             <Slider value={[labelColumnWidth]} onValueChange={(v)=>setLabelColumnWidth(Number(v[0]))} min={140} max={360} step={10} className="px-2" />
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Data ingestion */}
-      <Card className="rounded-2xl">
-        <CardContent className="p-4 flex flex-col md:flex-row gap-3 items-start md:items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Badge variant="secondary" className="rounded-full">Data</Badge>
-            <div className="text-sm text-muted-foreground">Upload a single Excel export that includes tasks and predecessors.</div>
-          </div>
-          <div className="flex gap-2">
-            <label className="inline-flex items-center gap-2 cursor-pointer">
-              <Upload className="w-4 h-4"/>
-              <input type="file" accept=".xlsx,.xls" className="hidden" onChange={async (e)=>{
-                const file = e.target.files?.[0];
-                if (!file) return;
-                await handleUploadXLSX(file);
-              }} />
-              <span className="text-sm">Upload Excel</span>
-            </label>
           </div>
         </CardContent>
       </Card>
