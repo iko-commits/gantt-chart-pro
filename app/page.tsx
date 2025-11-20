@@ -9,7 +9,7 @@ import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Download, Upload, Search, Filter, AlertTriangle, CalendarDays, Timer, Play, PlusCircle, Trash2, RotateCcw } from "lucide-react";
+import { Download, Upload, Search, Filter, AlertTriangle, CalendarDays, Timer, Play, PlusCircle, Trash2, RotateCcw, ChevronRight } from "lucide-react";
 import Image from "next/image";
 import { motion } from "framer-motion";
 import * as htmlToImage from "html-to-image";
@@ -1192,6 +1192,15 @@ export default function Page() {
   const [scenarioStatus, setScenarioStatus] = useState("");
   const [isSimulating, setIsSimulating] = useState(false);
   const [labelColumnWidth, setLabelColumnWidth] = useState(220);
+  const [chartSettingsOpen, setChartSettingsOpen] = useState(true);
+  const [scenarioLabOpen, setScenarioLabOpen] = useState(true);
+  const handleScenarioHeaderKeyDown = (event) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setScenarioLabOpen((prev) => !prev);
+    }
+  };
   const exportRef = useRef(null);
   const activeRows = simRows ?? rows;
   const rowById = useMemo(() => {
@@ -1502,11 +1511,23 @@ export default function Page() {
       {/* Controls */}
       <Card className="rounded-2xl">
         <CardContent className="p-4 space-y-4">
-          <div>
-            <div className="text-sm font-semibold">Chart settings</div>
-            <p className="text-xs text-muted-foreground">Adjust filters, labels, logic links, and zoom.</p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-8">
+          <button
+            type="button"
+            onClick={() => setChartSettingsOpen((prev) => !prev)}
+            className="flex w-full items-center justify-between rounded-xl px-1 py-1 text-left"
+            aria-expanded={chartSettingsOpen}
+            aria-controls="chart-settings-panel"
+          >
+            <div>
+              <div className="text-sm font-semibold">Chart settings</div>
+              <p className="text-xs text-muted-foreground">Adjust filters, labels, logic links, and zoom.</p>
+            </div>
+            <ChevronRight
+              className={`w-4 h-4 text-muted-foreground transition-transform ${chartSettingsOpen ? "rotate-90" : ""}`}
+            />
+          </button>
+          {chartSettingsOpen && (
+            <div id="chart-settings-panel" className="grid gap-3 md:grid-cols-8">
           <div className="flex items-center gap-2">
             <Search className="w-4 h-4 text-muted-foreground"/>
             <Input placeholder="Search by ID or Task name" value={query} onChange={(e)=>setQuery(e.target.value)} className="rounded-xl" />
@@ -1582,7 +1603,8 @@ export default function Page() {
             <div className="text-xs text-muted-foreground mb-1">Name column width: {labelColumnWidth}px</div>
             <Slider value={[labelColumnWidth]} onValueChange={(v)=>setLabelColumnWidth(Number(v[0]))} min={140} max={360} step={10} className="px-2" />
           </div>
-          </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -1590,9 +1612,34 @@ export default function Page() {
       <Card className="rounded-2xl border-dashed">
         <CardContent className="p-4 space-y-4">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div className="text-sm font-semibold">Scenario lab</div>
-              <p className="text-xs text-muted-foreground">Chain multiple activity adjustments, then re-run CPM. Save up to 10 scenarios.</p>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setScenarioLabOpen((prev) => !prev)}
+              onKeyDown={handleScenarioHeaderKeyDown}
+              className="flex w-full flex-col gap-2 rounded-xl px-1 py-1 text-left md:flex-1"
+              aria-expanded={scenarioLabOpen}
+              aria-controls="scenario-lab-panel"
+            >
+              <div>
+                <div className="text-sm font-semibold">Scenario lab</div>
+                <p className="text-xs text-muted-foreground">Chain multiple activity adjustments, then re-run CPM. Save up to 10 scenarios.</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="rounded-full"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    clearScenarioView();
+                  }}
+                  disabled={!simRows}
+                >
+                  <RotateCcw className="w-4 h-4 mr-1" />
+                  Reset
+                </Button>
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {activeScenario && (
@@ -1603,163 +1650,181 @@ export default function Page() {
               <Button
                 size="sm"
                 variant="ghost"
-                className="rounded-full"
+                className="rounded-full order-2 md:order-none"
                 onClick={clearScenarioView}
                 disabled={!simRows}
               >
                 <RotateCcw className="w-4 h-4 mr-1" />
                 Reset
               </Button>
-            </div>
-          </div>
-          <div className="space-y-3">
-            {draftImpacts.map((draft, idx) => (
-              <div key={draft.id} className="rounded-2xl border p-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <Badge variant="secondary" className="rounded-full">
-                    Linked activity #{idx + 1}
-                  </Badge>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="rounded-full"
-                    onClick={() => removeDraftImpact(draft.id)}
-                    disabled={draftImpacts.length === 1}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-1">
-                    <div className="text-xs text-muted-foreground">Activity ID</div>
-                    <Select value={draft.activityId} onValueChange={(val) => updateDraftImpact(draft.id, { activityId: val })}>
-                      <SelectTrigger className="rounded-xl">
-                        <SelectValue placeholder="Select activity" />
-                      </SelectTrigger>
-                      <SelectContent className="max-h-64">
-                        {activityOptions.map((opt) => (
-                          <SelectItem key={opt.id} value={String(opt.id)}>
-                            {opt.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-xs text-muted-foreground">Impact</div>
-                    <div className="flex gap-2">
-                      <Select value={draft.mode} onValueChange={(val) => updateDraftImpact(draft.id, { mode: val })}>
-                        <SelectTrigger className="rounded-xl w-32">
-                          <SelectValue placeholder="Impact" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="delay">Delay</SelectItem>
-                          <SelectItem value="accelerate">Accelerate</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Input
-                        type="number"
-                        min={0}
-                        className="rounded-xl"
-                        value={draft.days}
-                        onChange={(e) => updateDraftImpact(draft.id, { days: Math.max(0, Number(e.target.value) || 0) })}
-                        placeholder="Days"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <Button type="button" variant="outline" className="rounded-2xl" onClick={addDraftImpact}>
-              <PlusCircle className="w-4 h-4 mr-2" />
-              Add linked activity
-            </Button>
-          </div>
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="space-y-1 md:col-span-2">
-              <div className="text-xs text-muted-foreground">Scenario title</div>
-              <Input
-                className="rounded-xl"
-                placeholder="e.g. Rain delay chain"
-                value={scenarioTitle}
-                onChange={(e) => setScenarioTitle(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-2">
               <Button
-                className="rounded-2xl"
-                onClick={handleRunScenario}
-                disabled={!scenarioFormValid || isSimulating}
-              >
-                <Play className="w-4 h-4 mr-2" />
-                {isSimulating ? "Simulating..." : "Run scenario"}
-              </Button>
-              <Button
-                className="rounded-2xl"
                 type="button"
-                variant="secondary"
-                onClick={handleSaveScenario}
-                disabled={!scenarioFormValid || maxScenariosReached}
+                size="icon"
+                variant="ghost"
+                className="rounded-full order-1 md:order-none"
+                onClick={() => setScenarioLabOpen((prev) => !prev)}
+                aria-expanded={scenarioLabOpen}
+                aria-controls="scenario-lab-panel"
+                aria-label="Toggle Scenario Lab"
               >
-                <PlusCircle className="w-4 h-4 mr-2" />
-                Save to library
+                <ChevronRight
+                  className={`w-4 h-4 text-muted-foreground transition-transform ${scenarioLabOpen ? "rotate-90" : ""}`}
+                />
               </Button>
             </div>
           </div>
-          {scenarioStatus && <div className="text-xs text-muted-foreground">{scenarioStatus}</div>}
-          <div className="border-t pt-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">
-                Scenario library ({scenarioLibrary.length}/10)
-              </div>
-              <Badge variant="secondary" className="rounded-full">
-                {isSimulating ? "Running CPM..." : simRows ? "Scenario view" : "Baseline"}
-              </Badge>
-            </div>
-            {scenarioLibrary.length === 0 ? (
-              <div className="text-xs text-muted-foreground">No saved scenarios yet. Add linked activities above and click save.</div>
-            ) : (
-              <div className="space-y-2">
-                {scenarioLibrary.map((scenario) => (
-                  <div
-                    key={scenario.id}
-                    className="flex flex-col gap-2 rounded-2xl border p-3 md:flex-row md:items-center md:justify-between"
-                  >
-                    <div className="space-y-1">
-                      <div className="text-sm font-medium">{scenario.title}</div>
-                      <div className="flex flex-wrap gap-2">
-                        {normalizeScenarioImpacts(scenario).map((impact, idx) => (
-                          <Badge key={idx} variant="outline" className="rounded-full text-[11px]">
-                            #{idx + 1}: {impact.activityId} {impact.deltaDays >= 0 ? `+${impact.deltaDays}d` : `${impact.deltaDays}d`}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        className="rounded-full"
-                        variant={activeScenario?.id === scenario.id ? "default" : "outline"}
-                        onClick={() => runScenario(scenario)}
-                        disabled={isSimulating}
-                      >
-                        <Play className="w-3 h-3 mr-1" />
-                        {activeScenario?.id === scenario.id ? "Active" : "Run"}
-                      </Button>
+          {scenarioLabOpen && (
+            <>
+              <div id="scenario-lab-panel" className="space-y-3">
+                {draftImpacts.map((draft, idx) => (
+                  <div key={draft.id} className="rounded-2xl border p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Badge variant="secondary" className="rounded-full">
+                        Linked activity #{idx + 1}
+                      </Badge>
                       <Button
                         size="icon"
                         variant="ghost"
                         className="rounded-full"
-                        onClick={() => handleDeleteScenario(scenario.id)}
+                        onClick={() => removeDraftImpact(draft.id)}
+                        disabled={draftImpacts.length === 1}
                       >
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-1">
+                        <div className="text-xs text-muted-foreground">Activity ID</div>
+                        <Select value={draft.activityId} onValueChange={(val) => updateDraftImpact(draft.id, { activityId: val })}>
+                          <SelectTrigger className="rounded-xl">
+                            <SelectValue placeholder="Select activity" />
+                          </SelectTrigger>
+                          <SelectContent className="max-h-64">
+                            {activityOptions.map((opt) => (
+                              <SelectItem key={opt.id} value={String(opt.id)}>
+                                {opt.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-xs text-muted-foreground">Impact</div>
+                        <div className="flex gap-2">
+                          <Select value={draft.mode} onValueChange={(val) => updateDraftImpact(draft.id, { mode: val })}>
+                            <SelectTrigger className="rounded-xl w-32">
+                              <SelectValue placeholder="Impact" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="delay">Delay</SelectItem>
+                              <SelectItem value="accelerate">Accelerate</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Input
+                            type="number"
+                            min={0}
+                            className="rounded-xl"
+                            value={draft.days}
+                            onChange={(e) => updateDraftImpact(draft.id, { days: Math.max(0, Number(e.target.value) || 0) })}
+                            placeholder="Days"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 ))}
+                <Button type="button" variant="outline" className="rounded-2xl" onClick={addDraftImpact}>
+                  <PlusCircle className="w-4 h-4 mr-2" />
+                  Add linked activity
+                </Button>
               </div>
-            )}
-          </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="space-y-1 md:col-span-2">
+                  <div className="text-xs text-muted-foreground">Scenario title</div>
+                  <Input
+                    className="rounded-xl"
+                    placeholder="e.g. Rain delay chain"
+                    value={scenarioTitle}
+                    onChange={(e) => setScenarioTitle(e.target.value)}
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    className="rounded-2xl"
+                    onClick={handleRunScenario}
+                    disabled={!scenarioFormValid || isSimulating}
+                  >
+                    <Play className="w-4 h-4 mr-2" />
+                    {isSimulating ? "Simulating..." : "Run scenario"}
+                  </Button>
+                  <Button
+                    className="rounded-2xl"
+                    type="button"
+                    variant="secondary"
+                    onClick={handleSaveScenario}
+                    disabled={!scenarioFormValid || maxScenariosReached}
+                  >
+                    <PlusCircle className="w-4 h-4 mr-2" />
+                    Save to library
+                  </Button>
+                </div>
+              </div>
+              {scenarioStatus && <div className="text-xs text-muted-foreground">{scenarioStatus}</div>}
+              <div className="border-t pt-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    Scenario library ({scenarioLibrary.length}/10)
+                  </div>
+                  <Badge variant="secondary" className="rounded-full">
+                    {isSimulating ? "Running CPM..." : simRows ? "Scenario view" : "Baseline"}
+                  </Badge>
+                </div>
+                {scenarioLibrary.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">No saved scenarios yet. Add linked activities above and click save.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {scenarioLibrary.map((scenario) => (
+                      <div
+                        key={scenario.id}
+                        className="flex flex-col gap-2 rounded-2xl border p-3 md:flex-row md:items-center md:justify-between"
+                      >
+                        <div className="space-y-1">
+                          <div className="text-sm font-medium">{scenario.title}</div>
+                          <div className="flex flex-wrap gap-2">
+                            {normalizeScenarioImpacts(scenario).map((impact, idx) => (
+                              <Badge key={idx} variant="outline" className="rounded-full text-[11px]">
+                                #{idx + 1}: {impact.activityId} {impact.deltaDays >= 0 ? `+${impact.deltaDays}d` : `${impact.deltaDays}d`}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            className="rounded-full"
+                            variant={activeScenario?.id === scenario.id ? "default" : "outline"}
+                            onClick={() => runScenario(scenario)}
+                            disabled={isSimulating}
+                          >
+                            <Play className="w-3 h-3 mr-1" />
+                            {activeScenario?.id === scenario.id ? "Active" : "Run"}
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="rounded-full"
+                            onClick={() => handleDeleteScenario(scenario.id)}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 
